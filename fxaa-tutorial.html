@@ -1,0 +1,277 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>FXAA Example</title>
+    <style>
+      body {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas></canvas>
+    <script>
+      (async function () {
+        const canvas = document.querySelector("canvas");
+        const gl = canvas.getContext("webgl2");
+
+        canvas.style.width = `${1920 / devicePixelRatio}px`;
+        canvas.style.height = `${1080 / devicePixelRatio}px`;
+        canvas.width = 1920;
+        canvas.height = 1080;
+        gl.viewport(0, 0, 1920, 1080);
+
+        const vertexShaderSource = `#version 300 es
+          in vec3 a_Position;
+
+          out vec2 uv;
+
+          void main(void) {
+            uv = vec2((a_Position.x + 1.0) / 2.0, (a_Position.y + 1.0) / -2.0);
+            gl_Position = vec4(a_Position, 1.0);
+          }
+        `;
+
+        const fragmentShaderSource = `#version 300 es
+          precision highp float;
+
+          #define FxaaToFloat3(a) vec3((a), (a), (a))
+          #define FxaaTexLod0(tex, pos) textureLod(tex, pos, 0.0)
+          #define FxaaTexOff(tex, pos, off) textureLodOffset(tex, pos, 0.0, off)
+
+          #define FXAA_EDGE_THRESHOLD (1.0 / 8.0)
+          #define FXAA_EDGE_THRESHOLD_MIN (1.0 / 24.0)
+          #define FXAA_SEARCH_STEPS 24
+          #define FXAA_SEARCH_ACCELERATION 1
+          #define FXAA_SEARCH_THRESHOLD (1.0 / 4.0)
+          #define FXAA_SUBPIX 1
+          #define FXAA_SUBPIX_FASTER 0
+          #define FXAA_SUBPIX_CAP (3.0 / 4.0)
+          #define FXAA_SUBPIX_TRIM (1.0 / 4.0)
+
+          #define FXAA_SUBPIX_TRIM_SCALE (1.0 / (1.0 - FXAA_SUBPIX_TRIM))
+
+          float FxaaLuma(vec3 rgb)
+          {
+              return rgb.y * (0.587 / 0.299) + rgb.x;
+          }
+
+          vec3 FxaaLerp3(vec3 a, vec3 b, float amountOfA)
+          {
+              return (FxaaToFloat3(-amountOfA) * b) +
+                    ((a * FxaaToFloat3(amountOfA)) + b);
+          }
+
+          vec3 FxaaPixelShader(vec2 pos, sampler2D tex, vec2 rcpFrame)
+          {
+              vec3 rgbN = FxaaTexOff(tex, pos.xy, ivec2(0, -1)).xyz;
+              vec3 rgbW = FxaaTexOff(tex, pos.xy, ivec2(-1, 0)).xyz;
+              vec3 rgbM = FxaaTexOff(tex, pos.xy, ivec2(0, 0)).xyz;
+              vec3 rgbE = FxaaTexOff(tex, pos.xy, ivec2(1, 0)).xyz;
+              vec3 rgbS = FxaaTexOff(tex, pos.xy, ivec2(0, 1)).xyz;
+              float lumaN = FxaaLuma(rgbN);
+              float lumaW = FxaaLuma(rgbW);
+              float lumaM = FxaaLuma(rgbM);
+              float lumaE = FxaaLuma(rgbE);
+              float lumaS = FxaaLuma(rgbS);
+              float rangeMin = min(lumaM, min(min(lumaN, lumaW), min(lumaS, lumaE)));
+              float rangeMax = max(lumaM, max(max(lumaN, lumaW), max(lumaS, lumaE)));
+              float range = rangeMax - rangeMin;
+
+              if (range < max(FXAA_EDGE_THRESHOLD_MIN, rangeMax * FXAA_EDGE_THRESHOLD))
+              {
+                  return rgbM;
+              }
+
+              vec3 rgbL = rgbN + rgbW + rgbM + rgbE + rgbS;
+
+              float lumaL = (lumaN + lumaW + lumaE + lumaS) * 0.25;
+              float rangeL = abs(lumaL - lumaM);
+              float blendL = max(0.0, (rangeL / range) - FXAA_SUBPIX_TRIM) * FXAA_SUBPIX_TRIM_SCALE;
+              blendL = min(FXAA_SUBPIX_CAP, blendL);
+
+              vec3 rgbNW = FxaaTexOff(tex, pos.xy, ivec2(-1, -1)).xyz;
+              vec3 rgbNE = FxaaTexOff(tex, pos.xy, ivec2(1, -1)).xyz;
+              vec3 rgbSW = FxaaTexOff(tex, pos.xy, ivec2(-1, 1)).xyz;
+              vec3 rgbSE = FxaaTexOff(tex, pos.xy, ivec2(1, 1)).xyz;
+
+              rgbL += (rgbNW + rgbNE + rgbSW + rgbSE);
+              rgbL *= FxaaToFloat3(1.0 / 9.0);
+
+              float lumaNW = FxaaLuma(rgbNW);
+              float lumaNE = FxaaLuma(rgbNE);
+              float lumaSW = FxaaLuma(rgbSW);
+              float lumaSE = FxaaLuma(rgbSE);
+              float edgeVert =
+                  abs((0.25 * lumaNW) + (-0.5 * lumaN) + (0.25 * lumaNE)) +
+                  abs((0.50 * lumaW) + (-1.0 * lumaM) + (0.50 * lumaE)) +
+                  abs((0.25 * lumaSW) + (-0.5 * lumaS) + (0.25 * lumaSE));
+              float edgeHorz =
+                  abs((0.25 * lumaNW) + (-0.5 * lumaW) + (0.25 * lumaSW)) +
+                  abs((0.50 * lumaN) + (-1.0 * lumaM) + (0.50 * lumaS)) +
+                  abs((0.25 * lumaNE) + (-0.5 * lumaE) + (0.25 * lumaSE));
+              bool horzSpan = edgeHorz >= edgeVert;
+
+              float lengthSign = horzSpan ? -rcpFrame.y : -rcpFrame.x;
+              if (!horzSpan)
+                  lumaN = lumaW;
+              if (!horzSpan)
+                  lumaS = lumaE;
+              float gradientN = abs(lumaN - lumaM);
+              float gradientS = abs(lumaS - lumaM);
+              lumaN = (lumaN + lumaM) * 0.5;
+              lumaS = (lumaS + lumaM) * 0.5;
+
+              bool pairN = gradientN >= gradientS;
+
+              if (!pairN)
+                  lumaN = lumaS;
+              if (!pairN)
+                  gradientN = gradientS;
+              if (!pairN)
+                  lengthSign *= -1.0;
+              vec2 posN;
+              posN.x = pos.x + (horzSpan ? 0.0 : lengthSign * 0.5);
+              posN.y = pos.y + (horzSpan ? lengthSign * 0.5 : 0.0);
+
+              gradientN *= FXAA_SEARCH_THRESHOLD;
+
+              vec2 posP = posN;
+              vec2 offNP = horzSpan ? vec2(rcpFrame.x, 0.0) : vec2(0.0f, rcpFrame.y);
+              float lumaEndN = lumaN;
+              float lumaEndP = lumaN;
+              bool doneN = false;
+              bool doneP = false;
+
+              posN += offNP * vec2(-1.0, -1.0);
+              posP += offNP * vec2(1.0, 1.0);
+
+              for (int i = 0; i < FXAA_SEARCH_STEPS; i++)
+              {
+                  if (!doneN)
+                      lumaEndN =
+                          FxaaLuma(FxaaTexLod0(tex, posN.xy).xyz);
+                  if (!doneP)
+                      lumaEndP =
+                          FxaaLuma(FxaaTexLod0(tex, posP.xy).xyz);
+
+                  doneN = doneN || (abs(lumaEndN - lumaN) >= gradientN);
+                  doneP = doneP || (abs(lumaEndP - lumaN) >= gradientN);
+                  if (doneN && doneP)
+                      break;
+                  if (!doneN)
+                      posN -= offNP;
+                  if (!doneP)
+                      posP += offNP;
+              }
+
+              float dstN = horzSpan ? pos.x - posN.x : pos.y - posN.y;
+              float dstP = horzSpan ? posP.x - pos.x : posP.y - pos.y;
+              bool directionN = dstN < dstP;
+
+              lumaEndN = directionN ? lumaEndN : lumaEndP;
+
+              if (((lumaM - lumaN) < 0.0) == ((lumaEndN - lumaN) < 0.0))
+                  lengthSign = 0.0;
+
+              float spanLength = (dstP + dstN);
+              dstN = directionN ? dstN : dstP;
+              float subPixelOffset = (0.5 + (dstN * (-1.0 / spanLength))) * lengthSign;
+
+              vec3 rgbF = FxaaTexLod0(
+                              tex, vec2(pos.x + (horzSpan ? 0.0 : subPixelOffset), pos.y + (horzSpan ? subPixelOffset : 0.0)))
+                              .xyz;
+
+              return FxaaLerp3(rgbL, rgbF, blendL);
+          }
+
+          in vec2 uv;
+
+          uniform sampler2D tex;
+          uniform vec2 rcpFrame;
+
+          out vec4 fragColor;
+
+          void main(void)
+          {
+              fragColor = vec4(FxaaPixelShader(uv, tex, rcpFrame).xyz, 1.0);
+          }
+        `;
+
+        const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+        const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+
+        gl.shaderSource(vertexShader, vertexShaderSource);
+        gl.shaderSource(fragmentShader, fragmentShaderSource);
+
+        gl.compileShader(vertexShader);
+        gl.compileShader(fragmentShader);
+
+        if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS))
+          console.log(gl.getShaderInfoLog(fragmentShader));
+
+        const program = gl.createProgram();
+
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+
+        gl.linkProgram(program);
+
+        const vao = gl.createVertexArray();
+
+        gl.bindVertexArray(vao);
+
+        // prettier-ignore
+        const positionArray = new Float32Array([
+          1,  1, 0,
+          -1,  1, 0,
+          1, -1, 0,
+          -1, -1, 0
+        ]);
+        const positionBuffer = gl.createBuffer();
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, positionArray, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        gl.bindVertexArray(null);
+
+        const texture = gl.createTexture();
+        const image = document.createElement("img");
+
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = reject;
+
+          image.src = "fxaa-off.png";
+        });
+
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          image
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+
+        gl.useProgram(program);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+
+        const location = gl.getUniformLocation(program, "rcpFrame");
+        gl.uniform2fv(location, [1 / canvas.width, 1 / canvas.height]);
+
+        gl.bindVertexArray(vao);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.bindVertexArray(null);
+      })();
+    </script>
+  </body>
+</html>
